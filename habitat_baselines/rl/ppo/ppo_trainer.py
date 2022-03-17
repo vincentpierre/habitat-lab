@@ -10,6 +10,7 @@ import random
 import time
 from collections import defaultdict, deque
 from typing import Any, Dict, List, Optional
+from PIL import Image
 
 import numpy as np
 import torch
@@ -43,9 +44,7 @@ from habitat_baselines.rl.ddppo.ddp_utils import (
     requeue_job,
     save_resume_state,
 )
-from habitat_baselines.rl.ddppo.policy import (  # noqa: F401.
-    PointNavResNetPolicy,
-)
+from habitat_baselines.rl.ddppo.policy.resnet_policy_bpsnav import PointNavResNetPolicy
 from habitat_baselines.rl.ppo import PPO
 from habitat_baselines.rl.ppo.policy import Policy
 from habitat_baselines.utils.common import (
@@ -54,8 +53,20 @@ from habitat_baselines.utils.common import (
     batch_obs,
     generate_video,
 )
-from habitat_baselines.utils.env_utils import construct_envs
+from habitat_baselines.utils.env_utils import construct_envs, construct_batched_envs
 
+try:
+    from habitat_sim.utils import viz_utils as vut
+except ImportError:
+    vut = None
+
+from torch.cuda.amp import autocast
+from torch.cuda.amp import GradScaler 
+class dummy_context_mgr():
+    def __enter__(self):
+        return None
+    def __exit__(self, exc_type, exc_value, traceback):
+        return False
 
 @baseline_registry.register_trainer(name="ddppo")
 @baseline_registry.register_trainer(name="ppo")
@@ -86,7 +97,8 @@ class PPOTrainer(BaseRLTrainer):
         # Distributed if the world size would be
         # greater than 1
         self._is_distributed = get_distrib_size()[2] > 1
-        self._obs_batching_cache = ObservationBatchingCache()
+        if not self.config.BATCHED_ENV:
+            self._obs_batching_cache = ObservationBatchingCache()
 
         self.using_velocity_ctrl = (
             self.config.TASK_CONFIG.TASK.POSSIBLE_ACTIONS
@@ -191,10 +203,13 @@ class PPOTrainer(BaseRLTrainer):
         if config is None:
             config = self.config
 
-        self.envs = construct_envs(
-            config,
-            get_env_class(config.ENV_NAME),
-            workers_ignore_signals=is_slurm_batch_job(),
+        if config.BATCHED_ENV:
+            self.envs = construct_batched_envs(config)
+        else:
+            self.envs = construct_envs(
+                config,
+                get_env_class(config.ENV_NAME),
+                workers_ignore_signals=is_slurm_batch_job(),
         )
 
     def _init_train(self):
@@ -249,16 +264,21 @@ class PPOTrainer(BaseRLTrainer):
 
         self._init_envs()
 
-        if self.using_velocity_ctrl:
-            self.policy_action_space = self.envs.action_spaces[0][
-                "VELOCITY_CONTROL"
-            ]
-            action_shape = (2,)
+        if self.config.BATCHED_ENV:
+            self.policy_action_space = self.envs.action_spaces[0]
+            action_shape = self.policy_action_space.shape
             discrete_actions = False
         else:
-            self.policy_action_space = self.envs.action_spaces[0]
-            action_shape = None
-            discrete_actions = True
+            if self.using_velocity_ctrl:
+                self.policy_action_space = self.envs.action_spaces[0][
+                    "VELOCITY_CONTROL"
+                ]
+                action_shape = (2,)
+                discrete_actions = False
+            else:
+                self.policy_action_space = self.envs.action_spaces[0]
+                action_shape = None
+                discrete_actions = True
 
         ppo_cfg = self.config.RL.PPO
         if torch.cuda.is_available():
@@ -311,9 +331,13 @@ class PPOTrainer(BaseRLTrainer):
         self.rollouts.to(self.device)
 
         observations = self.envs.reset()
-        batch = batch_obs(
-            observations, device=self.device, cache=self._obs_batching_cache
-        )
+        if self.config.BATCHED_ENV:
+            batch = observations
+        else:
+            batch = batch_obs(
+                observations, device=self.device, cache=self._obs_batching_cache
+            )
+            print("batch['rgb'].shape: ", batch['rgb'].shape)
         batch = apply_obs_transforms_batch(batch, self.obs_transforms)
 
         if self._static_encoder:
@@ -334,6 +358,7 @@ class PPOTrainer(BaseRLTrainer):
         self.env_time = 0.0
         self.pth_time = 0.0
         self.t_start = time.time()
+        self.t_recent = self.t_start
 
     @rank0_only
     @profiling_wrapper.RangeContext("save_checkpoint")
@@ -428,42 +453,51 @@ class PPOTrainer(BaseRLTrainer):
                 env_slice,
             ]
 
-            profiling_wrapper.range_push("compute actions")
-            (
-                values,
-                actions,
-                actions_log_probs,
-                recurrent_hidden_states,
-            ) = self.actor_critic.act(
-                step_batch["observations"],
-                step_batch["recurrent_hidden_states"],
-                step_batch["prev_actions"],
-                step_batch["masks"],
-            )
+            use_mixed_precision = True if hasattr(self.agent, "grad_scaler") else False
+            precision_context = autocast if use_mixed_precision else dummy_context_mgr
+            with precision_context():
+                profiling_wrapper.range_push("compute actions")
+                (
+                    values,
+                    actions,
+                    actions_log_probs,
+                    recurrent_hidden_states,
+                ) = self.actor_critic.act(
+                    step_batch["observations"],
+                    step_batch["recurrent_hidden_states"],
+                    step_batch["prev_actions"],
+                    step_batch["masks"],
+                    deterministic = False  # temp force determinism?
+                )
 
-        # NB: Move actions to CPU.  If CUDA tensors are
-        # sent in to env.step(), that will create CUDA contexts
-        # in the subprocesses.
-        # For backwards compatibility, we also call .item() to convert to
-        # an int
-        actions = actions.to(device="cpu")
+        if not self.config.BATCHED_ENV:
+            # NB: Move actions to CPU.  If CUDA tensors are
+            # sent in to env.step(), that will create CUDA contexts
+            # in the subprocesses.
+            # For backwards compatibility, we also call .item() to convert to
+            # an int
+            actions = actions.to(device="cpu")
         self.pth_time += time.time() - t_sample_action
 
         profiling_wrapper.range_pop()  # compute actions
 
         t_step_env = time.time()
 
-        for index_env, act in zip(
-            range(env_slice.start, env_slice.stop), actions.unbind(0)
-        ):
-            if self.using_velocity_ctrl:
-                step_action = action_to_velocity_control(act)
-            else:
-                step_action = act.item()
-            self.envs.async_step_at(index_env, step_action)
+        if self.config.BATCHED_ENV:
+            self.envs.async_step(actions)
+        else:
+            for index_env, act in zip(
+                range(env_slice.start, env_slice.stop), actions.unbind(0)
+            ):
+                if self.using_velocity_ctrl:
+                    step_action = action_to_velocity_control(act)
+                else:
+                    step_action = act.item()
+                self.envs.async_step_at(index_env, step_action)
 
         self.env_time += time.time() - t_step_env
 
+        profiling_wrapper.range_push("save to rollout storage")
         self.rollouts.insert(
             next_recurrent_hidden_states=recurrent_hidden_states,
             actions=actions,
@@ -471,6 +505,7 @@ class PPOTrainer(BaseRLTrainer):
             value_preds=values,
             buffer_index=buffer_index,
         )
+        profiling_wrapper.range_pop() # save to rollout storage
 
     def _collect_environment_result(self, buffer_index: int = 0):
         num_envs = self.envs.num_envs
@@ -480,22 +515,31 @@ class PPOTrainer(BaseRLTrainer):
         )
 
         t_step_env = time.time()
-        outputs = [
-            self.envs.wait_step_at(index_env)
-            for index_env in range(env_slice.start, env_slice.stop)
-        ]
-
-        observations, rewards_l, dones, infos = [
-            list(x) for x in zip(*outputs)
-        ]
+        if self.config.BATCHED_ENV:
+            outputs = self.envs.wait_step()
+            batched_observations, rewards_l, dones, infos = outputs
+        else:
+            outputs = [
+                self.envs.wait_step_at(index_env)
+                for index_env in range(env_slice.start, env_slice.stop)
+            ]
+            observations, rewards_l, dones, infos = [
+                list(x) for x in zip(*outputs)
+            ]
 
         self.env_time += time.time() - t_step_env
 
         t_update_stats = time.time()
-        batch = batch_obs(
-            observations, device=self.device, cache=self._obs_batching_cache
-        )
+
+        if self.config.BATCHED_ENV:
+            batch = batched_observations
+        else:
+            batch = batch_obs(
+                observations, device=self.device, cache=self._obs_batching_cache
+            )
         batch = apply_obs_transforms_batch(batch, self.obs_transforms)
+
+        profiling_wrapper.range_push("rewards, done_masks, stats")
 
         rewards = torch.tensor(
             rewards_l,
@@ -515,24 +559,29 @@ class PPOTrainer(BaseRLTrainer):
         current_ep_reward = self.current_episode_reward[env_slice]
         self.running_episode_stats["reward"][env_slice] += current_ep_reward.where(done_masks, current_ep_reward.new_zeros(()))  # type: ignore
         self.running_episode_stats["count"][env_slice] += done_masks.float()  # type: ignore
-        for k, v_k in self._extract_scalars_from_infos(infos).items():
-            v = torch.tensor(
-                v_k,
-                dtype=torch.float,
-                device=self.current_episode_reward.device,
-            ).unsqueeze(1)
-            if k not in self.running_episode_stats:
-                self.running_episode_stats[k] = torch.zeros_like(
-                    self.running_episode_stats["count"]
-                )
+        if False:
+            for k, v_k in self._extract_scalars_from_infos(infos).items():
+                v = torch.tensor(
+                    v_k,
+                    dtype=torch.float,
+                    device=self.current_episode_reward.device,
+                ).unsqueeze(1)
+                if k not in self.running_episode_stats:
+                    self.running_episode_stats[k] = torch.zeros_like(
+                        self.running_episode_stats["count"]
+                    )
 
-            self.running_episode_stats[k][env_slice] += v.where(done_masks, v.new_zeros(()))  # type: ignore
+                self.running_episode_stats[k][env_slice] += v.where(done_masks, v.new_zeros(()))  # type: ignore
 
         self.current_episode_reward[env_slice].masked_fill_(done_masks, 0.0)
+
+        profiling_wrapper.range_pop()  # rewards, done_masks, stats
 
         if self._static_encoder:
             with torch.no_grad():
                 batch["visual_features"] = self._encoder(batch)
+
+        profiling_wrapper.range_push("save observations to rollout storage")
 
         self.rollouts.insert(
             next_observations=batch,
@@ -541,36 +590,41 @@ class PPOTrainer(BaseRLTrainer):
             buffer_index=buffer_index,
         )
 
+        profiling_wrapper.range_pop()  # save observations to rollout storage
+
         self.rollouts.advance_rollout(buffer_index)
 
         self.pth_time += time.time() - t_update_stats
 
         return env_slice.stop - env_slice.start
 
-    @profiling_wrapper.RangeContext("_collect_rollout_step")
+    @profiling_wrapper.RangeContext("rollout step")
     def _collect_rollout_step(self):
         self._compute_actions_and_step_envs()
         return self._collect_environment_result()
 
-    @profiling_wrapper.RangeContext("_update_agent")
+    @profiling_wrapper.RangeContext("update agent policy")
     def _update_agent(self):
         ppo_cfg = self.config.RL.PPO
         t_update_model = time.time()
-        with torch.no_grad():
-            step_batch = self.rollouts.buffers[
-                self.rollouts.current_rollout_step_idx
-            ]
+        use_mixed_precision = True if hasattr(self.agent, "grad_scaler") else False
+        precision_context = autocast if use_mixed_precision else dummy_context_mgr
+        with precision_context():
+            with torch.no_grad():
+                step_batch = self.rollouts.buffers[
+                    self.rollouts.current_rollout_step_idx
+                ]
 
-            next_value = self.actor_critic.get_value(
-                step_batch["observations"],
-                step_batch["recurrent_hidden_states"],
-                step_batch["prev_actions"],
-                step_batch["masks"],
+                next_value = self.actor_critic.get_value(
+                    step_batch["observations"],
+                    step_batch["recurrent_hidden_states"],
+                    step_batch["prev_actions"],
+                    step_batch["masks"],
+                )
+
+            self.rollouts.compute_returns(
+                next_value, ppo_cfg.use_gae, ppo_cfg.gamma, ppo_cfg.tau
             )
-
-        self.rollouts.compute_returns(
-            next_value, ppo_cfg.use_gae, ppo_cfg.gamma, ppo_cfg.tau
-        )
 
         self.agent.train()
 
@@ -660,13 +714,16 @@ class PPOTrainer(BaseRLTrainer):
 
         # log stats
         if self.num_updates_done % self.config.LOG_INTERVAL == 0:
+            t_curr = time.time()
             logger.info(
                 "update: {}\tfps: {:.3f}\t".format(
                     self.num_updates_done,
-                    self.num_steps_done
-                    / ((time.time() - self.t_start) + prev_time),
+                    (self.num_steps_done - self.recent_num_steps_done)
+                    / ((t_curr - self.t_recent)),
                 )
             )
+            self.recent_num_steps_done = self.num_steps_done
+            self.t_recent = t_curr
 
             logger.info(
                 "update: {}\tenv-time: {:.3f}s\tpth-time: {:.3f}s\t"
@@ -740,6 +797,8 @@ class PPOTrainer(BaseRLTrainer):
             self.window_episode_stats.update(
                 requeue_stats["window_episode_stats"]
             )
+
+        self.recent_num_steps_done = self.num_steps_done
 
         ppo_cfg = self.config.RL.PPO
 
@@ -830,6 +889,9 @@ class PPOTrainer(BaseRLTrainer):
                 if self._is_distributed:
                     self.num_rollouts_done_store.add("num_done", 1)
 
+                # do this before _update_agent, which resets some rollout storage state  
+                self._check_save_rollouts()
+
                 (
                     value_loss,
                     action_loss,
@@ -860,7 +922,92 @@ class PPOTrainer(BaseRLTrainer):
 
                 profiling_wrapper.range_pop()  # train update
 
+            logger.info(
+                "batched_sim stats: {}".format(self.envs._bsim.get_recent_stats_and_reset()))
+
             self.envs.close()
+
+    def _check_save_rollouts(self):
+
+        # save episodes periodically
+        num_updates_to_save = 5
+        num_updates_minus_one = self.num_updates_done
+        if self.config.SAVE_VIDEOS_INTERVAL != -1 and num_updates_minus_one % self.config.SAVE_VIDEOS_INTERVAL < num_updates_to_save:
+            is_first_update_of_save = num_updates_minus_one % self.config.SAVE_VIDEOS_INTERVAL == 0
+            if_last_update_of_save = num_updates_minus_one % self.config.SAVE_VIDEOS_INTERVAL == num_updates_to_save - 1
+
+            if self.envs.num_envs >= 19:
+                envs_to_save = [0, 1, 10, self.envs.num_envs - 8, self.envs.num_envs - 2, self.envs.num_envs - 1]
+            elif self.envs.num_envs >= 4:
+                envs_to_save = [0, 1, self.envs.num_envs - 2, self.envs.num_envs - 1]
+            else:
+                envs_to_save = range(self.envs.num_envs)
+
+            if is_first_update_of_save:
+                self.debug_video_observations = {}
+                for env_index in envs_to_save:
+                    self.debug_video_observations[env_index] = []
+
+            include_depth = "DEPTH_SENSOR" in self.config.SENSORS
+            include_rgb = "RGB_SENSOR" in self.config.SENSORS
+            obs_types_to_save = []
+            if include_depth:
+                obs_types_to_save.append("depth")
+            if include_rgb:
+                obs_types_to_save.append("rgb")
+            
+            assert self.rollouts.current_rollout_step_idx > 0
+            for frame_index in range(self.rollouts.current_rollout_step_idx):
+                
+                if include_rgb:
+                    rgb_obs = self.rollouts.buffers["observations"]["rgb"][frame_index]
+                    assert len(rgb_obs) == self.envs.num_envs
+                    if not isinstance(rgb_obs, np.ndarray):
+                        rgb_obs = rgb_obs.cpu().numpy()
+                if include_depth:
+                    depth_obs = self.rollouts.buffers["observations"]["depth"][frame_index]
+                    assert len(depth_obs) == self.envs.num_envs
+                    if not isinstance(depth_obs, np.ndarray):
+                        depth_obs = depth_obs.cpu().numpy()
+
+                for env_index in envs_to_save:
+                    env_saved_observations = self.debug_video_observations[env_index]
+                    new_dict = {}
+                    if include_rgb:
+                        new_dict["rgb"] = rgb_obs[env_index, ...]
+                    if include_depth:
+                        new_dict["depth"] = depth_obs[env_index, ...]
+                    env_saved_observations.append(new_dict)
+
+                    # reference code to save individual frames as images
+                    # video_folder = self.config.VIDEO_DIR
+                    # rgb_image = Image.fromarray(np.uint8(env_rgb))
+                    # rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+                    # rgb_image.save(video_folder + "/rank" + str(rank) + "_env" +
+                    #     str(env_index) + "_update_" + str(self.num_updates_done) +
+                    #     "_frame" + str(frame_index) + "_rgb.png")
+
+
+            if if_last_update_of_save:
+                if not vut:
+                    print("vut (viz utils) unavailable, so we can't save videos")
+                else:
+                    video_folder = self.config.VIDEO_DIR
+                    print("saving videos to ", video_folder)
+                    rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+                    for primary_obs_name in obs_types_to_save:
+                        for env_index in envs_to_save:
+                            env_saved_observations = self.debug_video_observations[env_index]
+                            vut.make_video(
+                                env_saved_observations,
+                                primary_obs_name,
+                                "color" if primary_obs_name == "rgb" else "depth",
+                                video_folder + "/rank" + str(rank) + "_update_" + str(self.num_updates_done) + "_env" + str(env_index) + "_" + primary_obs_name,
+                                fps=2,  # very slow fps
+                                open_vid=False,
+                            )
+                    print("done saving videos!")
+                    
 
     def _eval_checkpoint(
         self,
@@ -922,6 +1069,7 @@ class PPOTrainer(BaseRLTrainer):
         self.agent.load_state_dict(ckpt_dict["state_dict"])
         self.actor_critic = self.agent.actor_critic
 
+        assert not self.config.BATCHED_ENV  # todo: eval for batched env
         observations = self.envs.reset()
         batch = batch_obs(
             observations, device=self.device, cache=self._obs_batching_cache

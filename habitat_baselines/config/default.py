@@ -44,6 +44,15 @@ _C.LOG_INTERVAL = 10
 _C.LOG_FILE = "train.log"
 _C.FORCE_BLIND_POLICY = False
 _C.VERBOSE = True
+_C.BATCHED_ENV = False
+_C.STUB_BATCH_SIMULATOR = False
+_C.OVERLAP_PHYSICS = False
+_C.SAVE_VIDEOS_INTERVAL = -1
+_C.REWARD_SCALE = 1.0
+_C.HACK_ACTION_SCALE = 1.0
+_C.NUM_PHYSICS_SUBSTEPS = 1
+
+
 # For our use case, the CPU side things are mainly memory copies
 # and nothing of substantive compute. PyTorch has been making
 # more and more memory copies parallel, but that just ends up

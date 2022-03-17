@@ -15,6 +15,16 @@ from habitat.utils import profiling_wrapper
 from habitat_baselines.common.rollout_storage import RolloutStorage
 from habitat_baselines.rl.ppo.policy import Policy
 
+use_mixed_precision = True
+
+from torch.cuda.amp import autocast
+from torch.cuda.amp import GradScaler 
+class dummy_context_mgr():
+    def __enter__(self):
+        return None
+    def __exit__(self, exc_type, exc_value, traceback):
+        return False
+
 EPS_PPO = 1e-5
 
 
@@ -53,8 +63,17 @@ class PPO(nn.Module):
             lr=lr,
             eps=eps,
         )
+        
+        for p in actor_critic.parameters():
+            if not p.is_cuda:
+                print("error: param with shape ", p.shape, " is not cuda")
+                exit(0)
+
         self.device = next(actor_critic.parameters()).device
         self.use_normalized_advantage = use_normalized_advantage
+
+        if use_mixed_precision:
+            self.grad_scaler = GradScaler()
 
     def forward(self, *x):
         raise NotImplementedError
@@ -77,72 +96,87 @@ class PPO(nn.Module):
         dist_entropy_epoch = 0.0
 
         for _e in range(self.ppo_epoch):
-            profiling_wrapper.range_push("PPO.update epoch")
+            # profiling_wrapper.range_push("PPO.update epoch")
             data_generator = rollouts.recurrent_generator(
                 advantages, self.num_mini_batch
             )
 
             for batch in data_generator:
-                (
-                    values,
-                    action_log_probs,
-                    dist_entropy,
-                    _,
-                ) = self._evaluate_actions(
-                    batch["observations"],
-                    batch["recurrent_hidden_states"],
-                    batch["prev_actions"],
-                    batch["masks"],
-                    batch["actions"],
-                )
-
-                ratio = torch.exp(action_log_probs - batch["action_log_probs"])
-                surr1 = ratio * batch["advantages"]
-                surr2 = (
-                    torch.clamp(
-                        ratio, 1.0 - self.clip_param, 1.0 + self.clip_param
+                precision_context = autocast if use_mixed_precision else dummy_context_mgr
+                with precision_context():
+                    profiling_wrapper.range_push("PPO mini batch")
+                    (
+                        values,
+                        action_log_probs,
+                        dist_entropy,
+                        _,
+                    ) = self._evaluate_actions(
+                        batch["observations"],
+                        batch["recurrent_hidden_states"],
+                        batch["prev_actions"],
+                        batch["masks"],
+                        batch["actions"],
                     )
-                    * batch["advantages"]
-                )
-                action_loss = -(torch.min(surr1, surr2).mean())
 
-                if self.use_clipped_value_loss:
-                    value_pred_clipped = batch["value_preds"] + (
-                        values - batch["value_preds"]
-                    ).clamp(-self.clip_param, self.clip_param)
-                    value_losses = (values - batch["returns"]).pow(2)
-                    value_losses_clipped = (
-                        value_pred_clipped - batch["returns"]
-                    ).pow(2)
-                    value_loss = 0.5 * torch.max(
-                        value_losses, value_losses_clipped
+                    ratio = torch.exp(action_log_probs - batch["action_log_probs"])
+                    surr1 = ratio * batch["advantages"]
+                    surr2 = (
+                        torch.clamp(
+                            ratio, 1.0 - self.clip_param, 1.0 + self.clip_param
+                        )
+                        * batch["advantages"]
                     )
-                else:
-                    value_loss = 0.5 * (batch["returns"] - values).pow(2)
+                    action_loss = -(torch.min(surr1, surr2).mean())
 
-                value_loss = value_loss.mean()
-                dist_entropy = dist_entropy.mean()
+                    if self.use_clipped_value_loss:
+                        value_pred_clipped = batch["value_preds"] + (
+                            values - batch["value_preds"]
+                        ).clamp(-self.clip_param, self.clip_param)
+                        value_losses = (values - batch["returns"]).pow(2)
+                        value_losses_clipped = (
+                            value_pred_clipped - batch["returns"]
+                        ).pow(2)
+                        value_loss = 0.5 * torch.max(
+                            value_losses, value_losses_clipped
+                        )
+                    else:
+                        value_loss = 0.5 * (batch["returns"] - values).pow(2)
 
-                self.optimizer.zero_grad()
-                total_loss = (
-                    value_loss * self.value_loss_coef
-                    + action_loss
-                    - dist_entropy * self.entropy_coef
-                )
+                    value_loss = value_loss.mean()
+                    dist_entropy = dist_entropy.mean()
+
+                    self.optimizer.zero_grad()
+                    total_loss = (
+                        value_loss * self.value_loss_coef
+                        + action_loss
+                        - dist_entropy * self.entropy_coef
+                    )
 
                 self.before_backward(total_loss)
-                total_loss.backward()
+                profiling_wrapper.range_push("backward")
+                if use_mixed_precision:
+                    self.grad_scaler.scale(total_loss).backward()
+                else:
+                    total_loss.backward()
+                profiling_wrapper.range_pop()
                 self.after_backward(total_loss)
 
                 self.before_step()
-                self.optimizer.step()
+                profiling_wrapper.range_push("optimizer.step")
+                if use_mixed_precision:
+                    self.grad_scaler.step(self.optimizer)
+                    self.grad_scaler.update()
+                else:
+                    self.optimizer.step()
+                profiling_wrapper.range_pop()
                 self.after_step()
 
                 value_loss_epoch += value_loss.item()
                 action_loss_epoch += action_loss.item()
                 dist_entropy_epoch += dist_entropy.item()
+                profiling_wrapper.range_pop()
 
-            profiling_wrapper.range_pop()  # PPO.update epoch
+            # profiling_wrapper.range_pop()  # PPO.update epoch
 
         num_updates = self.ppo_epoch * self.num_mini_batch
 
@@ -169,9 +203,10 @@ class PPO(nn.Module):
         pass
 
     def before_step(self) -> None:
-        nn.utils.clip_grad_norm_(
-            self.actor_critic.parameters(), self.max_grad_norm
-        )
+        if False:
+            nn.utils.clip_grad_norm_(
+                self.actor_critic.parameters(), self.max_grad_norm
+            )
 
     def after_step(self) -> None:
         pass

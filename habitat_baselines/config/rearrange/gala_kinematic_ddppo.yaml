@@ -1,0 +1,31 @@
+TENSORBOARD_DIR: "/checkpoint/eundersander/gala_kinematic/tb/gala_kinematic_ddppo"
+CHECKPOINT_FOLDER: "/checkpoint/eundersander/gala_kinematic/ckpt/gala_kinematic_ddppo"
+VIDEO_DIR: "../videos"
+REWARD_SCALE: 0.01
+NUM_CHECKPOINTS: 0
+BATCHED_ENV: True
+OVERLAP_PHYSICS: True
+SAVE_VIDEOS_INTERVAL: 500
+NUM_UPDATES: 61
+NUM_ENVIRONMENTS: 512
+SIMULATOR:
+  AGENTS: ['AGENT_0']
+  AGENT_0:
+    SENSORS: ['HEAD_RGB_SENSOR']
+  HEAD_RGB_SENSOR:
+    WIDTH: 128
+    HEIGHT: 128
+RL:
+  PPO:
+    ppo_epoch: 1
+    num_steps: 32
+    entropy_coef: 0.0025
+    lr: 2.5e-4
+    use_linear_lr_decay: False
+    max_grad_norm: 1.0
+  POLICY:
+    name: "PointNavBaselinePolicy"
+    action_distribution_type: "gaussian"
+  DDPPO:
+    backbone: "PointNavResNetPolicy"
+FORCE_BLIND_POLICY: False
