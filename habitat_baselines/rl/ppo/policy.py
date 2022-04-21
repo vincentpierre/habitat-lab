@@ -205,7 +205,7 @@ class PointNavBaselineNet(Net):
         for k, v in self.observation_space.spaces.items():
             # All 1-dimension sensors are state sensors.
             if len(v.shape) == 1:
-                self._n_state += v.shape
+                self._n_state += v.shape[0]
                 self.ssc_keys.append(k)
                 print(f"adding sensor {k} : {v.shape} ")
 
