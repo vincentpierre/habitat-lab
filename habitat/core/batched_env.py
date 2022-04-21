@@ -585,14 +585,14 @@ class BatchedEnv:
             # global_target_position = state.robot_start_pos + to_target / to_target.length()
 
             curr_dist = (global_target_position - state.ee_pos).length()
-            success = curr_dist < self._config.GALA_SUCCESS_THRESH
+            success = curr_dist < self._config.REACH_SUCCESS_THRESH
             if success or state.episode_step_idx >= (
                 max_episode_len - self._stagger_agents[b]
             ):
                 self._stagger_agents[b] = 0
                 self.dones[b] = True
                 self.rewards[b] = (
-                    self._config.GALA_SUCCESS_REWARD if success else 0.0
+                    self._config.REACH_SUCCESS_REWARD if success else 0.0
                 )
                 self.infos[b] = {
                     "success": float(success),
