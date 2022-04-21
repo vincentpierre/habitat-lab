@@ -42,7 +42,7 @@ STATE_SENSORS:
     obs_key: "robot_ee_relative"
     shape: 3
   JOINT_SENSOR:
-    TYPE: "RobotEESensorConfig"
+    TYPE: "JointSensorConfig"
     obs_key: "joint_pos"
     shape: 7
   STEP_COUNT_SENSOR:
