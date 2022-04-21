@@ -33,13 +33,34 @@ MAX_EPISODE_LENGTH = -1
 
 
 class StateSensorConfig:
-    def __init__(self, config_key, shape, obs_key):
-        self.config_key = config_key
+    def __init__(self, shape, obs_key, polar=False, **kwargs):
+        self.polar = polar
         self.shape = shape
         self.obs_key = obs_key
 
     def get_obs(self, state):
         pass
+
+    def _get_relative_coordinate(
+        self, source_position, goal_position, source_rotation
+    ):
+        if self.polar:
+            return _get_spherical_coordinates(
+                source_position, goal_position, source_rotation
+            )
+        else:
+            return _get_cartesian_coordinates(
+                source_position, goal_position, source_rotation
+            )
+
+
+def _get_cartesian_coordinates(
+    source_position, goal_position, source_rotation
+):
+    source_T = mn.Matrix4.from_(source_rotation.to_matrix(), goal_position)
+    inverted_source_T = source_T.inverted()
+    rel_pos = inverted_source_T.transform_point(goal_position)
+    return np.array(rel_pos)
 
 
 def _get_spherical_coordinates(
@@ -66,72 +87,46 @@ def _get_spherical_coordinates(
 
 
 class RobotStartSensorConfig(StateSensorConfig):
-    def __init__(self):
-        super().__init__("ROBOT_START_RELATIVE", 3, "robot_start_relative")
-
     def get_obs(self, state):
         robot_pos = state.robot_pos
         robot_rot = state.robot_rotation
         start_pos = state.robot_start_pos
-        return _get_spherical_coordinates(robot_pos, start_pos, robot_rot)
+        return self._get_relative_coordinate(robot_pos, start_pos, robot_rot)
 
 
 class RobotTargetSensorConfig(StateSensorConfig):
-    def __init__(self):
-        super().__init__("ROBOT_TARGET_RELATIVE", 3, "robot_target_relative")
-
     def get_obs(self, state):
         robot_pos = state.robot_pos
         robot_rot = state.robot_rotation
         target_pos = state.target_obj_start_pos
-        return _get_spherical_coordinates(robot_pos, target_pos, robot_rot)
+        return self._get_relative_coordinate(robot_pos, target_pos, robot_rot)
 
 
 class EEStartSensorConfig(StateSensorConfig):
-    def __init__(self):
-        super().__init__("EE_START_RELATIVE", 3, "ee_start_relative")
-
     def get_obs(self, state):
         ee_pos = state.ee_pos
         ee_rot = state.ee_rotation
         start_pos = state.robot_start_pos
-        return _get_spherical_coordinates(ee_pos, start_pos, ee_rot)
+        return self._get_relative_coordinate(ee_pos, start_pos, ee_rot)
 
 
 class EETargetSensorConfig(StateSensorConfig):
-    def __init__(self):
-        super().__init__("EE_TARGET_RELATIVE", 3, "ee_target_relative")
-
     def get_obs(self, state):
         ee_pos = state.ee_pos
         ee_rot = state.ee_rotation
         target_pos = state.target_obj_start_pos
-        return _get_spherical_coordinates(ee_pos, target_pos, ee_rot)
+        return self._get_relative_coordinate(ee_pos, target_pos, ee_rot)
 
 
 class RobotEESensorConfig(StateSensorConfig):
-    def __init__(self):
-        super().__init__("ROBOT_EE_RELATIVE", 3, "robot_ee_relative")
-
     def get_obs(self, state):
         robot_pos = state.robot_pos
         robot_rot = state.robot_rotation
         ee_pos = state.ee_pos
-        return _get_spherical_coordinates(robot_pos, ee_pos, robot_rot)
-
-
-class JointSensorConfig(StateSensorConfig):
-    def __init__(self):
-        super().__init__("JOINT_SENSOR", 7, "joint_pos")
-
-    def get_obs(self, state):
-        return state.robot_joint_positions[-9:-2]
+        return self._get_relative_coordinate(robot_pos, ee_pos, robot_rot)
 
 
 class StepCountSensorConfig(StateSensorConfig):
-    def __init__(self):
-        super().__init__("STEP_COUNT_SENSOR", 3, "step_count")
-
     def get_obs(self, state):
         fraction_steps_left = (
             (MAX_EPISODE_LENGTH - state.episode_step_idx)
@@ -191,17 +186,13 @@ class BatchedEnv:
         MAX_EPISODE_LENGTH = config.MAX_EPISODE_LENGTH
 
         self.state_sensor_config: List[StateSensorConfig] = []
-        for ssc in [
-            RobotStartSensorConfig(),
-            RobotTargetSensorConfig(),
-            EEStartSensorConfig(),
-            EETargetSensorConfig(),
-            JointSensorConfig(),
-            RobotEESensorConfig(),
-            StepCountSensorConfig(),
-        ]:
-            if ssc.config_key in config.SENSORS:
-                self.state_sensor_config.append(ssc)
+        for ssc_name in config.SENSORS:
+            if "RGB" in ssc_name or "DEPTH" in ssc_name:
+                continue
+            ssc_cfg = config.STATE_SENSORS[ssc_name]
+            ssc_cls = eval(ssc_cfg.TYPE)
+            ssc = ssc_cls(**ssc_cfg)
+            self.state_sensor_config.append(ssc)
 
         assert include_depth or include_rgb
 
@@ -502,6 +493,7 @@ class BatchedEnv:
     def get_nonpixel_observations(self, env_states, observations):
         for (b, state) in enumerate(env_states):
             for ssc in self.state_sensor_config:
+                breakpoint()
                 sensor_data = torch.tensor(ssc.get_obs(state))
                 observations[ssc.obs_key][b, :] = sensor_data
 
