@@ -3,7 +3,7 @@ CHECKPOINT_FOLDER: "/checkpoint/eundersander/gala_kinematic/ckpt/gala_kinematic_
 VIDEO_DIR: "../videos2"
 VIDEO_OPTION: ["disk"]
 REWARD_SCALE: 1.0 # 0.01
-NUM_CHECKPOINTS: 10
+NUM_CHECKPOINTS: 50
 BATCHED_ENV: True
 OVERLAP_PHYSICS: True
 SAVE_VIDEOS_INTERVAL: 500
