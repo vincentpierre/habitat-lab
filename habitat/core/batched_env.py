@@ -493,7 +493,6 @@ class BatchedEnv:
     def get_nonpixel_observations(self, env_states, observations):
         for (b, state) in enumerate(env_states):
             for ssc in self.state_sensor_config:
-                breakpoint()
                 sensor_data = torch.tensor(ssc.get_obs(state))
                 observations[ssc.obs_key][b, :] = sensor_data
 
