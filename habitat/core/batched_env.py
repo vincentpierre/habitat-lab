@@ -174,6 +174,11 @@ class RobotEESensorConfig(StateSensorConfig):
         return self._get_relative_coordinate(robot_pos, ee_pos, robot_rot)
 
 
+class JointSensorConfig(StateSensorConfig):
+    def get_obs(self, state):
+        return state.robot_joint_positions[-9:-2]
+
+
 class StepCountSensorConfig(StateSensorConfig):
     def get_obs(self, state):
         fraction_steps_left = (
