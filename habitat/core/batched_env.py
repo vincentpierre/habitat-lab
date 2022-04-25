@@ -195,6 +195,11 @@ class JointSensorConfig(StateSensorConfig):
         return state.robot_joint_positions[-9:-2]
 
 
+class HoldingSensorConfig(StateSensorConfig):
+    def get_obs(self, state):
+        return float(state.target_obj_idx == state.held_obj_idx)
+
+
 class StepCountSensorConfig(StateSensorConfig):
     def get_obs(self, state):
         fraction_steps_left = (
@@ -601,22 +606,25 @@ class BatchedEnv:
                 self.infos[b] = {}
                 continue
 
+            prev_state = self._previous_state[b]
             ee_to_start = (state.target_obj_start_pos - state.ee_pos).length()
             # success = curr_dist < self._config.REACH_SUCCESS_THRESH
             # success = state.target_obj_idx == state.held_obj_idx
 
             is_holding_correct = state.target_obj_idx == state.held_obj_idx
+            was_holding_correct = (
+                prev_state.target_obj_idx == prev_state.held_obj_idx
+            )
 
             obj_pos = state.obj_positions[state.target_obj_idx]
             obj_to_goal = (state.goal_pos - obj_pos).length()
-            success = is_holding_correct and (
+            success = was_holding_correct and (
                 obj_to_goal < self._config.NPNP_SUCCESS_THRESH
-            )  # and state.did_drop
+            )
 
             if self._config.get("TASK_IS_PLACE", False):
                 success = success and state.did_drop
 
-            prev_state = self._previous_state[b]
             failure = (state.did_drop and not success) or (
                 state.target_obj_idx != state.held_obj_idx
                 and state.held_obj_idx != -1
@@ -640,7 +648,8 @@ class BatchedEnv:
                     "episode_steps": state.episode_step_idx,
                     "distance_to_start": ee_to_start,
                     "distance_to_goal": obj_to_goal,
-                    "is_holding_correct": is_holding_correct,
+                    "is_holding_correct": float(is_holding_correct),
+                    "was_holding_correct": float(was_holding_correct),
                 }
                 self._previous_state[b] = None
 
@@ -666,7 +675,8 @@ class BatchedEnv:
                     "episode_steps": state.episode_step_idx,
                     "distance_to_start": ee_to_start,
                     "distance_to_goal": obj_to_goal,
-                    "is_holding_correct": is_holding_correct,
+                    "is_holding_correct": float(is_holding_correct),
+                    "was_holding_correct": float(was_holding_correct),
                 }
                 if self._previous_state[b] is not None:
                     if not is_holding_correct:
