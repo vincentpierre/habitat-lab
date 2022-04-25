@@ -612,6 +612,10 @@ class BatchedEnv:
             success = is_holding_correct and (
                 obj_to_goal < self._config.NPNP_SUCCESS_THRESH
             )  # and state.did_drop
+
+            if self._config.get("TASK_IS_PLACE", False):
+                success = success and state.did_drop
+
             prev_state = self._previous_state[b]
             failure = (state.did_drop and not success) or (
                 state.target_obj_idx != state.held_obj_idx
