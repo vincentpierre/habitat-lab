@@ -612,9 +612,11 @@ class BatchedEnv:
             # success = state.target_obj_idx == state.held_obj_idx
 
             is_holding_correct = state.target_obj_idx == state.held_obj_idx
-            was_holding_correct = (
-                prev_state.target_obj_idx == prev_state.held_obj_idx
-            )
+            was_holding_correct = False
+            if prev_state is not None:
+                was_holding_correct = (
+                    prev_state.target_obj_idx == prev_state.held_obj_idx
+                )
 
             obj_pos = state.obj_positions[state.target_obj_idx]
             obj_to_goal = (state.goal_pos - obj_pos).length()
