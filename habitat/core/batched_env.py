@@ -197,7 +197,7 @@ class JointSensorConfig(StateSensorConfig):
 
 class HoldingSensorConfig(StateSensorConfig):
     def get_obs(self, state):
-        return float(state.target_obj_idx == state.held_obj_idx)
+        return float(state.target_obj_idx != -1)
 
 
 class StepCountSensorConfig(StateSensorConfig):
@@ -608,6 +608,7 @@ class BatchedEnv:
 
             prev_state = self._previous_state[b]
             ee_to_start = (state.target_obj_start_pos - state.ee_pos).length()
+
             # success = curr_dist < self._config.REACH_SUCCESS_THRESH
             # success = state.target_obj_idx == state.held_obj_idx
 
@@ -627,10 +628,13 @@ class BatchedEnv:
             if self._config.get("TASK_IS_PLACE", False):
                 success = success and state.did_drop
 
-            failure = (state.did_drop and not success) or (
-                state.target_obj_idx != state.held_obj_idx
-                and state.held_obj_idx != -1
-            )
+            failure = False  # and (
+            #     (state.did_drop and not success)
+            #     or (
+            #         state.target_obj_idx != state.held_obj_idx
+            #         and state.held_obj_idx != -1
+            #     )
+            # )
 
             if (
                 success
@@ -681,22 +685,25 @@ class BatchedEnv:
                     "was_holding_correct": float(was_holding_correct),
                 }
                 if self._previous_state[b] is not None:
+                    prev_obj_pos = prev_state.obj_positions[
+                        prev_state.target_obj_idx
+                    ]
                     if not is_holding_correct:
-                        prev_dist = (
-                            prev_state.target_obj_start_pos - prev_state.ee_pos
+                        curr_dist = (
+                            state.obj_positions[state.target_obj_idx]
+                            - state.ee_pos
                         ).length()
-                        self.rewards[b] += -(ee_to_start - prev_dist)
+                        prev_dist = (prev_obj_pos - prev_state.ee_pos).length()
+                        self.rewards[b] += -(curr_dist - prev_dist)
                     else:
-                        prev_obj_pos = prev_state.obj_positions[
-                            prev_state.target_obj_idx
-                        ]
+
                         prev_obj_to_goal = (
                             prev_state.goal_pos - prev_obj_pos
                         ).length()
                         self.rewards[b] += -(obj_to_goal - prev_obj_to_goal)
 
-                    if is_holding_correct and (prev_state.held_obj_idx == -1):
-                        self.rewards[b] += self._config.PICK_REWARD
+                    # if is_holding_correct and (prev_state.held_obj_idx == -1):
+                    #     self.rewards[b] += self._config.PICK_REWARD
                 self._previous_state[b] = state
 
     def reset(self):
@@ -755,6 +762,8 @@ class BatchedEnv:
                 self._bsim.start_step_physics_or_reset(
                     actions_flat_list, self.resets
                 )
+                for b, info in enumerate(self.infos):
+                    info["action"] = actions[b, :].abs().mean().item()
 
             else:
                 # note: this path is untested
