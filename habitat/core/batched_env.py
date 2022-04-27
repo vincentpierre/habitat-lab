@@ -13,6 +13,7 @@ import numpy as np
 from gym import spaces
 from gym.spaces import Box
 
+from habitat.core.logging import logger
 from habitat.tasks.utils import cartesian_to_polar
 from habitat.utils import profiling_wrapper
 from habitat.utils.geometry_utils import quaternion_rotate_vector
@@ -31,14 +32,14 @@ class Camera:  # noqa: SIM119
         self._hfov = hfov
 
 
-MAX_EPISODE_LENGTH = -1
-
-
 class StateSensorConfig:
-    def __init__(self, shape, obs_key, polar=False, **kwargs):
+    def __init__(
+        self, shape, obs_key, max_episode_length, polar=False, **kwargs
+    ):
         self.polar = polar
         self.shape = shape
         self.obs_key = obs_key
+        self.max_episode_length = max_episode_length
 
     def get_obs(self, state) -> np.ndarray:
         raise NotImplementedError()
@@ -203,9 +204,9 @@ class HoldingSensorConfig(StateSensorConfig):
 class StepCountSensorConfig(StateSensorConfig):
     def get_obs(self, state):
         fraction_steps_left = (
-            (MAX_EPISODE_LENGTH - state.episode_step_idx)
+            (self.max_episode_length - state.episode_step_idx)
             * 1.0
-            / MAX_EPISODE_LENGTH
+            / self.max_episode_length
         )
         return (
             min(1.0, fraction_steps_left * 1.0),
@@ -256,8 +257,7 @@ class BatchedEnv:
         include_depth = "DEPTH_SENSOR" in config.SENSORS
         include_rgb = "RGB_SENSOR" in config.SENSORS
 
-        global MAX_EPISODE_LENGTH
-        MAX_EPISODE_LENGTH = config.MAX_EPISODE_LENGTH
+        self._max_episode_length = config.MAX_EPISODE_LENGTH
 
         self.state_sensor_config: List[StateSensorConfig] = []
         for ssc_name in config.SENSORS:
@@ -265,7 +265,9 @@ class BatchedEnv:
                 continue
             ssc_cfg = config.STATE_SENSORS[ssc_name]
             ssc_cls = eval(ssc_cfg.TYPE)
-            ssc = ssc_cls(**ssc_cfg)
+            ssc = ssc_cls(
+                max_episode_length=self._max_episode_length, **ssc_cfg
+            )
             self.state_sensor_config.append(ssc)
 
         assert include_depth or include_rgb
@@ -506,7 +508,7 @@ class BatchedEnv:
         self._stagger_agents = [0] * self._num_envs
         if self._config.get("STAGGER", True):
             self._stagger_agents = [
-                i % MAX_EPISODE_LENGTH for i in range(self._num_envs)
+                i % self._max_episode_length for i in range(self._num_envs)
             ]
 
         self.action_spaces = [
@@ -577,19 +579,21 @@ class BatchedEnv:
                 ssc.get_batch_obs(env_states)
             )
             if not torch.isfinite(observations[ssc.obs_key]).all():
-                print(ssc.obs_key, "nan")
+                logger.info((ssc.obs_key, "nan"))
                 for b, s in enumerate(env_states):
-                    print(observations[ssc.obs_key][b, :])
-                    print(
-                        s.robot_pos,
-                        s.robot_rotation,
-                        s.robot_start_pos,
-                        s.robot_start_rotation,
-                        s.ee_pos,
-                        s.ee_rotation,
-                        s.robot_start_pos,
-                        s.robot_start_rotation,
-                        s.target_obj_start_pos,
+                    logger.info(observations[ssc.obs_key][b, :])
+                    logger.info(
+                        (
+                            s.robot_pos,
+                            s.robot_rotation,
+                            s.robot_start_pos,
+                            s.robot_start_rotation,
+                            s.ee_pos,
+                            s.ee_rotation,
+                            s.robot_start_pos,
+                            s.robot_start_rotation,
+                            s.target_obj_start_pos,
+                        )
                     )
                 observations[ssc.obs_key] = torch.nan_to_num(
                     observations[ssc.obs_key], 0.0
@@ -597,7 +601,6 @@ class BatchedEnv:
 
     def get_dones_rewards_resets(self, env_states, actions):
         for (b, state) in enumerate(env_states):
-            max_episode_len = MAX_EPISODE_LENGTH
             if self._current_episodes[b].is_disabled():
                 # let this episode continue in the sim; ignore the results
                 assert self.resets[b] == -1
@@ -640,7 +643,7 @@ class BatchedEnv:
                 success
                 or failure
                 or state.episode_step_idx
-                >= (max_episode_len - self._stagger_agents[b])
+                >= (self._max_episode_length - self._stagger_agents[b])
             ):
                 self._stagger_agents[b] = 0
                 self.dones[b] = True
@@ -674,7 +677,7 @@ class BatchedEnv:
             else:
                 self.resets[b] = -1
                 self.dones[b] = False
-                self.rewards[b] = -1.0 / MAX_EPISODE_LENGTH
+                self.rewards[b] = -1.0 / self._max_episode_length
                 self.infos[b] = {
                     "success": 0.0,
                     "failure": 0.0,
@@ -696,14 +699,13 @@ class BatchedEnv:
                         prev_dist = (prev_obj_pos - prev_state.ee_pos).length()
                         self.rewards[b] += -(curr_dist - prev_dist)
                     else:
-
                         prev_obj_to_goal = (
                             prev_state.goal_pos - prev_obj_pos
                         ).length()
                         self.rewards[b] += -(obj_to_goal - prev_obj_to_goal)
-
                     # if is_holding_correct and (prev_state.held_obj_idx == -1):
                     #     self.rewards[b] += self._config.PICK_REWARD
+
                 self._previous_state[b] = state
 
     def reset(self):
