@@ -10,7 +10,11 @@ from typing import Any, List, Type, Union
 
 import habitat
 from habitat import Config, Env, RLEnv, VectorEnv, logger, make_dataset
+from habitat.utils.vector_env_action_dict_wrapper import (
+    VectorEnvActionDictWrapper,
+)
 
+from habitat.utils.vector_env_obs_dict_wrapper import VectorEnvObsDictWrapper
 
 def make_env_fn(
     config: Config, env_class: Union[Type[Env], Type[RLEnv]]
@@ -110,9 +114,28 @@ def construct_envs(
     else:
         vector_env_cls = habitat.VectorEnv
 
-    envs = vector_env_cls(
-        make_env_fn=make_env_fn,
-        env_fn_args=tuple(zip(configs, env_classes)),
-        workers_ignore_signals=workers_ignore_signals,
-    )
-    return envs
+    # envs = vector_env_cls(
+    #     make_env_fn=make_env_fn,
+    #     env_fn_args=tuple(zip(configs, env_classes)),
+    #     workers_ignore_signals=workers_ignore_signals,
+    # )
+    # return envs
+
+    from gym.vector import AsyncVectorEnv
+
+    from habitat.utils.gym_definitions import gym_from_config
+
+    def make_gym_env(config: Config) -> Union[Env, RLEnv]:
+        def _make_single_env():
+            return gym_from_config(config)
+
+        return _make_single_env
+
+    # return VectorEnvActionDictWrapper(
+    #     AsyncVectorEnv(
+    #     [make_gym_env(c) for c in configs], context="forkserver"
+    # )
+    # )
+    return VectorEnvObsDictWrapper(AsyncVectorEnv( [make_gym_env(c) for c in configs], context="forkserver") )
+    # return AsyncVectorEnv( [make_gym_env(c) for c in configs], context="forkserver")
+        

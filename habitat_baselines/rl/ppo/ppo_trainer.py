@@ -23,6 +23,7 @@ from habitat.core.environments import get_env_class
 from habitat.utils import profiling_wrapper
 from habitat.utils.env_utils import construct_envs
 from habitat.utils.render_wrapper import overlay_frame
+from habitat.utils.unbatch_space import unbatch_space
 from habitat.utils.visualizations.utils import observations_to_image
 from habitat_baselines.common.base_trainer import BaseRLTrainer
 from habitat_baselines.common.baseline_registry import baseline_registry
@@ -104,8 +105,8 @@ class PPOTrainer(BaseRLTrainer):
     @property
     def obs_space(self):
         if self._obs_space is None and self.envs is not None:
-            self._obs_space = self.envs.observation_spaces[0]
-
+            self._obs_space = unbatch_space(self.envs.observation_space)
+        print(">>>>>>>>>>>>", self._obs_space)
         return self._obs_space
 
     @obs_space.setter
@@ -258,7 +259,7 @@ class PPOTrainer(BaseRLTrainer):
 
         self._init_envs()
 
-        action_space = self.envs.action_spaces[0]
+        action_space = self.envs.action_space
         if self.using_velocity_ctrl:
             # For navigation using a continuous action space for a task that
             # may be asking for discrete actions
@@ -388,7 +389,12 @@ class PPOTrainer(BaseRLTrainer):
         """
         return torch.load(checkpoint_path, *args, **kwargs)
 
-    METRICS_BLACKLIST = {"top_down_map", "collisions.is_collision"}
+    METRICS_BLACKLIST = {
+        "top_down_map",
+        "collisions.is_collision",
+        "terminal_observation",
+    }
+    #  terminal_observation.observation is a gym specific info that is not useful here
 
     @classmethod
     def _extract_scalars_from_info(
@@ -430,6 +436,7 @@ class PPOTrainer(BaseRLTrainer):
         return results
 
     def _compute_actions_and_step_envs(self, buffer_index: int = 0):
+        assert self._nbuffers == 1
         num_envs = self.envs.num_envs
         env_slice = slice(
             int(buffer_index * num_envs / self._nbuffers),
@@ -470,16 +477,18 @@ class PPOTrainer(BaseRLTrainer):
 
         t_step_env = time.time()
 
-        for index_env, act in zip(
-            range(env_slice.start, env_slice.stop), actions.unbind(0)
-        ):
-            if act.shape[0] > 1:
-                step_action = action_array_to_dict(
-                    self.policy_action_space, act
-                )
-            else:
-                step_action = act.item()
-            self.envs.async_step_at(index_env, step_action)
+        # for index_env, act in zip(
+        #     range(env_slice.start, env_slice.stop), actions.unbind(0)
+        # ):
+        #     if act.shape[0] > 1:
+        #         step_action = action_array_to_dict(
+        #             self.policy_action_space, act
+        #         )
+        #     else:
+        #         step_action = act.item()
+        #     self.envs.async_step_at(index_env, step_action)
+        step_action = np.clip(actions.detach().cpu().numpy(), -1.0, 1.0)
+        self.envs.step_async(step_action)
 
         self.env_time += time.time() - t_step_env
 
@@ -492,6 +501,7 @@ class PPOTrainer(BaseRLTrainer):
         )
 
     def _collect_environment_result(self, buffer_index: int = 0):
+        assert self._nbuffers == 1
         num_envs = self.envs.num_envs
         env_slice = slice(
             int(buffer_index * num_envs / self._nbuffers),
@@ -499,14 +509,13 @@ class PPOTrainer(BaseRLTrainer):
         )
 
         t_step_env = time.time()
-        outputs = [
-            self.envs.wait_step_at(index_env)
-            for index_env in range(env_slice.start, env_slice.stop)
-        ]
+        # outputs = [
+        #     self.envs.wait_step_at(index_env)
+        #     for index_env in range(env_slice.start, env_slice.stop)
+        # ]
+        outputs = self.envs.step_wait()
 
-        observations, rewards_l, dones, infos = [
-            list(x) for x in zip(*outputs)
-        ]
+        observations, rewards_l, dones, infos = outputs
 
         self.env_time += time.time() - t_step_env
 
@@ -544,7 +553,6 @@ class PPOTrainer(BaseRLTrainer):
                 self.running_episode_stats[k] = torch.zeros_like(
                     self.running_episode_stats["count"]
                 )
-
             self.running_episode_stats[k][env_slice] += v.where(done_masks, v.new_zeros(()))  # type: ignore
 
         self.current_episode_reward[env_slice].masked_fill_(done_masks, 0.0)
@@ -934,7 +942,7 @@ class PPOTrainer(BaseRLTrainer):
 
         self._init_envs(config)
 
-        action_space = self.envs.action_spaces[0]
+        action_space = self.envs.action_space
         if self.using_velocity_ctrl:
             # For navigation using a continuous action space for a task that
             # may be asking for discrete actions

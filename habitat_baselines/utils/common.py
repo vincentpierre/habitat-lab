@@ -232,6 +232,7 @@ def batch_obs(
     Returns:
         transposed dict of torch.Tensor of observations.
     """
+    return observations
     batch_t: TensorDict = TensorDict()
     if cache is None:
         batch: DefaultDict[str, List] = defaultdict(list)
@@ -638,16 +639,18 @@ def action_to_velocity_control(
 
 
 def is_continuous_action_space(action_space) -> bool:
-    if not isinstance(action_space, spaces.Dict):
-        return False
+    if isinstance(action_space, spaces.Box):
+        return True
+    # if not isinstance(action_space, spaces.Dict):
+    #     return False
 
-    for v in action_space.spaces.values():
-        if isinstance(v, spaces.Dict):
-            return is_continuous_action_space(v)
-        elif isinstance(v, spaces.Box):
-            return True
+    # for v in action_space.spaces.values():
+    #     if isinstance(v, spaces.Dict):
+    #         return is_continuous_action_space(v)
+    #     elif isinstance(v, spaces.Box):
+    #         return True
 
-    return False
+    # return False
 
 
 def get_num_actions(action_space) -> int:
@@ -658,7 +661,10 @@ def get_num_actions(action_space) -> int:
         if isinstance(v, spaces.Dict):
             queue.extend(v.spaces.values())
         elif isinstance(v, spaces.Box):
-            num_actions += v.shape[0]
+            assert len(v.shape) == 2
+            # when using AsyncVectorEnv, the action space is actually
+            # two dimensional
+            num_actions += v.shape[1]
         else:
             num_actions += 1
 
