@@ -24,6 +24,17 @@ from habitat.sims.habitat_simulator.actions import (
 )
 from habitat.tasks.nav.nav import SimulatorTaskAction
 
+######################################################################
+################### CREATE NEW HABITAT-SIM ACTIONS ###################
+######################################################################
+
+# This creation is optional: You can have task actions is habitat-lab
+# that directly modify the scene. Note that habitat-sim actions can
+# only be discrete actions.
+# As an example, our Navigation actions
+# all use underlying habitat-sim actions while our Rearrangement tasks
+# do not.
+
 
 @attr.s(auto_attribs=True, slots=True)
 class NoisyStrafeActuationSpec:
@@ -31,6 +42,22 @@ class NoisyStrafeActuationSpec:
     # Classic strafing is to move perpendicular (90 deg) to the forward direction
     strafe_angle: float = 90.0
     noise_amount: float = 0.05
+
+
+@habitat_sim.registry.register_move_fn(body_action=True)
+class NoisyStrafeLeft(habitat_sim.SceneNodeControl):
+    def __call__(
+        self,
+        scene_node: habitat_sim.SceneNode,
+        actuation_spec: NoisyStrafeActuationSpec,
+    ):
+        print(f"strafing left with noise_amount={actuation_spec.noise_amount}")
+        _strafe_impl(
+            scene_node,
+            actuation_spec.move_amount,
+            actuation_spec.strafe_angle,
+            actuation_spec.noise_amount,
+        )
 
 
 def _strafe_impl(
@@ -60,22 +87,6 @@ def _strafe_impl(
 
 
 @habitat_sim.registry.register_move_fn(body_action=True)
-class NoisyStrafeLeft(habitat_sim.SceneNodeControl):
-    def __call__(
-        self,
-        scene_node: habitat_sim.SceneNode,
-        actuation_spec: NoisyStrafeActuationSpec,
-    ):
-        print(f"strafing left with noise_amount={actuation_spec.noise_amount}")
-        _strafe_impl(
-            scene_node,
-            actuation_spec.move_amount,
-            actuation_spec.strafe_angle,
-            actuation_spec.noise_amount,
-        )
-
-
-@habitat_sim.registry.register_move_fn(body_action=True)
 class NoisyStrafeRight(habitat_sim.SceneNodeControl):
     def __call__(
         self,
@@ -91,6 +102,14 @@ class NoisyStrafeRight(habitat_sim.SceneNodeControl):
             -actuation_spec.strafe_angle,
             actuation_spec.noise_amount,
         )
+
+
+######################################################################
+################# REGISTER HABITAT-SIM ACTIONS #######################
+######################################################################
+
+# If you create habitat-sim actions, they need to be registered
+# into habitat-lab.
 
 
 @habitat.registry.register_action_space_configuration
