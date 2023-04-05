@@ -8,7 +8,9 @@ r"""Implements task and measurements needed for training and benchmarking of
 """
 
 from collections import OrderedDict
-from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List
+from typing import MutableMapping as MutableMapping_T
+from typing import Optional, Union
 
 import numpy as np
 from omegaconf import OmegaConf
@@ -77,6 +79,14 @@ class SimulatorTaskAction(Action):
     def step(self, *args: Any, **kwargs: Any) -> Observations:
         r"""Step method is called from ``Env`` on each ``step``."""
         raise NotImplementedError
+
+    def set_sim_action(
+        self,
+        action: Optional[
+            Union[str, int, MutableMapping_T[int, Union[str, int]]]
+        ],
+    ):
+        self._sim.step(action, dt=0.0, return_observations=False)
 
 
 class Measure:
@@ -299,7 +309,6 @@ class EmbodiedTask:
         action_name: Any,
         action: Dict[str, Any],
         episode: Episode,
-        is_last_action=True,
     ):
         if isinstance(action_name, (int, np.integer)):
             action_name = self.get_action_name(action_name)
@@ -307,12 +316,9 @@ class EmbodiedTask:
             action_name in self.actions
         ), f"Can't find '{action_name}' action in {self.actions.keys()}."
         task_action = self.actions[action_name]
-        observations.update(
-            task_action.step(
-                **action["action_args"],
-                task=self,
-                is_last_action=is_last_action,
-            )
+        task_action.step(
+            **action["action_args"],
+            task=self,
         )
 
     def step(self, action: Dict[str, Any], episode: Episode):
@@ -321,18 +327,21 @@ class EmbodiedTask:
             action["action_args"] = {}
         observations: Any = {}
         if isinstance(action_name, tuple):  # there are multiple actions
-            for i, a_name in enumerate(action_name):
+            for a_name in action_name:
                 self._step_single_action(
                     observations,
                     a_name,
                     action,
                     episode,
-                    i == len(action_name) - 1,
                 )
         else:
             self._step_single_action(
                 observations, action_name, action, episode
             )
+
+        observations.update(
+            self._sim.step(None, dt=1.0 / 60.0, return_observations=True)
+        )
 
         observations.update(
             self.sensor_suite.get_observations(

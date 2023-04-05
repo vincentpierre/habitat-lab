@@ -426,8 +426,15 @@ class HabitatSim(habitat_sim.Simulator, Simulator):
         else:
             return self._sensor_suite.get_observations(sim_obs)
 
-    def step(self, action: Union[str, np.ndarray, int]) -> Observations:
-        sim_obs = super().step(action)
+    def step(
+        self,
+        action: Union[str, np.ndarray, int],
+        dt: float = 1.0 / 60.0,
+        return_observations: bool = True,
+    ) -> Optional[Observations]:
+        sim_obs = super().step(action, dt, return_observations)
+        if sim_obs is None:
+            return None
         self._prev_sim_obs = sim_obs
         if self.config.enable_batch_renderer:
             self.add_keyframe_to_observations(sim_obs)

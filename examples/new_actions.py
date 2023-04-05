@@ -161,9 +161,9 @@ class NoiseStrafe(HabitatSimV1ActionSpaceConfiguration):
 
 # Wether or not you create new habitat-sim actions, you need to add
 # your actions to habitat-lab. In our case we simply call
-# self._sim.step with our habitat-sim action but you could directly
-# modify the _sim here.
-# Note that the API to interact with the _sim might change betweenreleases!
+# self.set_sim_actionwith our habitat-sim.
+# Note that the API to interact with the private fields like _sim
+# might change between releases!
 
 
 @habitat.registry.register_task_action
@@ -172,7 +172,7 @@ class StrafeLeft(SimulatorTaskAction):
         return "strafe_left"
 
     def step(self, *args, **kwargs):
-        return self._sim.step(HabitatSimActions.STRAFE_LEFT)
+        return self.set_sim_action(HabitatSimActions.STRAFE_LEFT)
 
 
 @habitat.registry.register_task_action
@@ -181,7 +181,7 @@ class StrafeRight(SimulatorTaskAction):
         return "strafe_right"
 
     def step(self, *args, **kwargs):
-        return self._sim.step(HabitatSimActions.STRAFE_RIGHT)
+        return self.set_sim_action(HabitatSimActions.STRAFE_RIGHT)
 
 
 ######################################################################

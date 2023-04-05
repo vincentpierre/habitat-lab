@@ -1048,7 +1048,7 @@ class MoveForwardAction(SimulatorTaskAction):
         r"""Update ``_metric``, this method is called from ``Env`` on each
         ``step``.
         """
-        return self._sim.step(HabitatSimActions.move_forward)
+        return self.set_sim_action(HabitatSimActions.move_forward)
 
 
 @registry.register_task_action
@@ -1057,7 +1057,7 @@ class TurnLeftAction(SimulatorTaskAction):
         r"""Update ``_metric``, this method is called from ``Env`` on each
         ``step``.
         """
-        return self._sim.step(HabitatSimActions.turn_left)
+        return self.set_sim_action(HabitatSimActions.turn_left)
 
 
 @registry.register_task_action
@@ -1066,7 +1066,7 @@ class TurnRightAction(SimulatorTaskAction):
         r"""Update ``_metric``, this method is called from ``Env`` on each
         ``step``.
         """
-        return self._sim.step(HabitatSimActions.turn_right)
+        return self.set_sim_action(HabitatSimActions.turn_right)
 
 
 @registry.register_task_action
@@ -1090,7 +1090,7 @@ class LookUpAction(SimulatorTaskAction):
         r"""Update ``_metric``, this method is called from ``Env`` on each
         ``step``.
         """
-        return self._sim.step(HabitatSimActions.look_up)
+        return self.set_sim_action(HabitatSimActions.look_up)
 
 
 @registry.register_task_action
@@ -1099,7 +1099,7 @@ class LookDownAction(SimulatorTaskAction):
         r"""Update ``_metric``, this method is called from ``Env`` on each
         ``step``.
         """
-        return self._sim.step(HabitatSimActions.look_down)
+        return self.set_sim_action(HabitatSimActions.look_down)
 
 
 @registry.register_task_action
