@@ -34,6 +34,9 @@ from habitat.tasks.nav.nav import SimulatorTaskAction
 # As an example, our Navigation actions
 # all use underlying habitat-sim actions while our Rearrangement tasks
 # do not.
+# A sim action need to implement __call__ with a "habitat_sim.SceneNode"
+# argument (used to modify the scene) and a Spec (specific configuration
+# for your action)
 
 
 @attr.s(auto_attribs=True, slots=True)
@@ -56,6 +59,24 @@ class NoisyStrafeLeft(habitat_sim.SceneNodeControl):
             scene_node,
             actuation_spec.move_amount,
             actuation_spec.strafe_angle,
+            actuation_spec.noise_amount,
+        )
+
+
+@habitat_sim.registry.register_move_fn(body_action=True)
+class NoisyStrafeRight(habitat_sim.SceneNodeControl):
+    def __call__(
+        self,
+        scene_node: habitat_sim.SceneNode,
+        actuation_spec: NoisyStrafeActuationSpec,
+    ):
+        print(
+            f"strafing right with noise_amount={actuation_spec.noise_amount}"
+        )
+        _strafe_impl(
+            scene_node,
+            actuation_spec.move_amount,
+            -actuation_spec.strafe_angle,
             actuation_spec.noise_amount,
         )
 
@@ -86,30 +107,18 @@ def _strafe_impl(
     scene_node.translate_local(move_ax * move_amount)
 
 
-@habitat_sim.registry.register_move_fn(body_action=True)
-class NoisyStrafeRight(habitat_sim.SceneNodeControl):
-    def __call__(
-        self,
-        scene_node: habitat_sim.SceneNode,
-        actuation_spec: NoisyStrafeActuationSpec,
-    ):
-        print(
-            f"strafing right with noise_amount={actuation_spec.noise_amount}"
-        )
-        _strafe_impl(
-            scene_node,
-            actuation_spec.move_amount,
-            -actuation_spec.strafe_angle,
-            actuation_spec.noise_amount,
-        )
-
-
 ######################################################################
 ################# REGISTER HABITAT-SIM ACTIONS #######################
 ######################################################################
 
 # If you create habitat-sim actions, they need to be registered
-# into habitat-lab.
+# into habitat-lab. In this example, we register NoNoiseStrafe
+# and NoiseStrafe. Both use the same habitat-sim NoisyStrafeRight
+# and NoisyStrafeLeft actions, but with a different action spec
+# (with and without noise).
+# We inherit an existing ActionSpaceConfiguration
+# (here HabitatSimV1ActionSpaceConfiguration) so we can keep existing
+# actions as well.
 
 
 @habitat.registry.register_action_space_configuration
@@ -146,6 +155,17 @@ class NoiseStrafe(HabitatSimV1ActionSpaceConfiguration):
         return config
 
 
+######################################################################
+################# CREATE YOUR HABITAT-LAB ACTIONS ####################
+######################################################################
+
+# Wether or not you create new habitat-sim actions, you need to add
+# your actions to habitat-lab. In our case we simply call
+# self._sim.step with our habitat-sim action but you could directly
+# modify the _sim here.
+# Note that the API to interact with the _sim might change betweenreleases!
+
+
 @habitat.registry.register_task_action
 class StrafeLeft(SimulatorTaskAction):
     def _get_uuid(self, *args, **kwargs) -> str:
@@ -164,10 +184,21 @@ class StrafeRight(SimulatorTaskAction):
         return self._sim.step(HabitatSimActions.STRAFE_RIGHT)
 
 
+######################################################################
+##################### HOW TO USE YOUR NEW ACTIONS ####################
+######################################################################
+
+
 def main():
+    # If you create new habitat-sim actions, you need to register them
+    # to the HabitatSimActions. This will add a new potential discrete
+    # action.
     HabitatSimActions.extend_action_space("STRAFE_LEFT")
     HabitatSimActions.extend_action_space("STRAFE_RIGHT")
 
+    # Modify the configuration. Here we modify the configuration via code,
+    # but most of the time, you will simply just edit a yaml configuration
+    # file
     config = habitat.get_config(
         config_path="benchmark/nav/pointnav/pointnav_habitat_test.yaml"
     )
@@ -179,7 +210,9 @@ def main():
         config.habitat.task.actions["STRAFE_RIGHT"] = ActionConfig(
             type="StrafeRight"
         )
-
+        # If you create a new action_space_configuration, you need to
+        # specify it in the configuration. Otherwise the default will
+        # be used and your new actions will be unavailable.
         config.habitat.simulator.action_space_config = "NoNoiseStrafe"
 
     with habitat.Env(config=config) as env:
